@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+
 #include <arpa/inet.h>
 
 using namespace std;
@@ -81,7 +82,7 @@ int main(int argc,char* arg[])
   char *dev;			/* The device to sniff on */
   char errbuf[PCAP_ERRBUF_SIZE];	/* Error string */
   struct bpf_program fp;		/* The compiled filter */
-		char filter_exp[] = "port 80";	/* The filter expression */
+		char filter_exp[] = "";	/* The filter expression */
 		bpf_u_int32 mask;		/* Our netmask */
 		bpf_u_int32 net;		/* Our IP */
 		struct pcap_pkthdr header;	/* The header that pcap gives us */
@@ -141,12 +142,19 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header,
 		printf("   * Invalid IP header length: %u bytes\n", size_ip);
 		return;
 	}
-	tcp = (struct sniff_tcp*)(packet + SIZE_ETHERNET + size_ip);
-	size_tcp = TH_OFF(tcp)*4;
-	if (size_tcp < 20) {
-		printf("   * Invalid TCP header length: %u bytes\n", size_tcp);
-		return;
-	}
-  printf("src:%d -> dst:%d\n",ntohs(tcp->th_sport),ntohs(tcp->th_dport));
-	payload = (u_char *)(packet + SIZE_ETHERNET + size_ip + size_tcp);
+  if(ip->ip_p==6)
+    {
+      tcp = (struct sniff_tcp*)(packet + SIZE_ETHERNET + size_ip);
+      size_tcp = TH_OFF(tcp)*4;
+      if (size_tcp < 20) {
+        printf("   * Invalid TCP header length: %u bytes\n", size_tcp);
+        return;
+      }
+      printf("tcp src:%s -> dst:%s\n",inet_ntoa(ip->ip_src),inet_ntoa(ip->ip_dst));
+      payload = (u_char *)(packet + SIZE_ETHERNET + size_ip + size_tcp);
+    }
+  else    if(ip->ip_p==17)
+    {
+      printf("udp\n");
+    }
 }
