@@ -12,7 +12,8 @@
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
 #include <arpa/inet.h>
-
+#include <string.h>
+#include <unistd.h>
 #include <thread>
 #include <queue>
 using namespace std;
@@ -33,6 +34,13 @@ struct sniff_ethernet {
         u_short ether_type;                     /* IP? ARP? RARP? etc */
 };
 
+struct router_param
+{
+  int jitter;
+  int latency;//ms
+  float loss_rate;
+  in_addr ip1,ip2;
+} Parameter;
 uint32_t transfer_endian(uint32_t bigendian,int size)
 {
   uint32_t res=0;
@@ -46,70 +54,107 @@ uint32_t transfer_endian(uint32_t bigendian,int size)
   }
   return res;
 }
+#define TE(a,b) transfer_endian(a,b)
 
-class bad_packet{
+class bad_ip_packet{
 public:
   time_t c_time;
   string data;
-  bad_packet(const string& d)
+
+  bad_ip_packet(const string& d)
     {
       time(&c_time);
       data=d;
     }
 };
-bool operator<(const bad_packet& a,const bad_packet&b)
+bool operator<(const bad_ip_packet& a,const bad_ip_packet&b)
 {
   return a.c_time<b.c_time;
 }
 
-priority_queue<bad_packet> data_queue;
+priority_queue<bad_ip_packet> data_queue;
 
-#define BUFLEN 512  //Max length of buffer
-#define PORT 8888   //The port on which to listen for incoming data
 void auto_send()
 {
-  struct sockaddr_in si_other;
-  int s, i, slen = sizeof(si_other) , recv_len;
-  //create a UDP socket
-  if ((s=socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1)
-  {
-    return;
+  int sock,on=1;
+  sock = socket(AF_INET , SOCK_RAW , IPPROTO_UDP);
+  if(0>setsockopt(sock,IPPROTO_IP,IP_HDRINCL,&on,sizeof(on))){
+    perror("IP_HDRINCL failed");
+    exit(1);
   }
-  si_other.sin_family = AF_INET;
-  si_other.sin_port = htons(PORT);
-  si_other.sin_addr.s_addr = inet_addr("10.0.2.1");
+  struct sockaddr_in target;
+  bzero(&target,sizeof(struct sockaddr_in));
+  target.sin_family=AF_INET;
+  target.sin_port=htons(6666);
+  target.sin_addr.s_addr=inet_addr("192.168.56.1");
   while(1)
   while(!data_queue.empty())
   {
-    auto pack=data_queue.top();
+    auto t= data_queue.top();
     data_queue.pop();
-    if(sendto(s, pack.data.c_str(), pack.data.size(), 0, (struct sockaddr*) &si_other, slen)==-1)
-      cout<<"wrong!"<<endl;
+    cout<<"ip size:"<<t.data.size()<<endl;
+
+
+   setuid(getpid());
+   // if(sendto(sock,t.data.c_str(),t.data.size(),0,(struct sockaddr*)&target,sizeof(struct sockaddr_in))<0)
+   if(send(sock,t.data.c_str(),t.data.size(),0)<0)
+   {
+     printf("error:%d\n",errno);
+   };
   }
 }
 void got_packet(u_char *args, const struct pcap_pkthdr *header,
                 const u_char *packet);
-
-int main(int argc,char* arg[])
+void help(){}
+int main(int argc,char* argv[])
 {
   pcap_t *handle;			/* Session handle */
   char *dev;			/* The device to sniff on */
   char errbuf[PCAP_ERRBUF_SIZE];	/* Error string */
   struct bpf_program fp;		/* The compiled filter */
-  const char* filter_exp = "";	/* The filter expression */
-		bpf_u_int32 mask;		/* Our netmask */
-		bpf_u_int32 net;		/* Our IP */
-		struct pcap_pkthdr header;	/* The header that pcap gives us */
-		const u_char *packet;		/* The actual packet */
-        /* Define the device */
-        if(argc>1)
-          dev=arg[1];
-        else
-          dev = pcap_lookupdev(errbuf);
-		if (dev == NULL) {
-			fprintf(stderr, "Couldn't find default device: %s\n", errbuf);
-			return(2);
-		}
+  char filter_exp[100];	/* The filter expression */
+  //set parameter
+  static const char *optString = "?v:s:d:l::r::j::";
+  char opt;
+  opt = getopt( argc, argv, optString );
+  while( opt != -1 ) {
+    switch(opt)
+    {
+    case 'v':
+      dev=optarg;
+      break;
+    case '?':
+      help();
+      break;
+    case 's':
+      cout<<optarg<<endl;
+      Parameter.ip1=(struct in_addr){inet_addr(optarg)};
+      break;
+    case 'd':
+      Parameter.ip2=(struct in_addr){inet_addr(optarg)};
+      break;
+    case 'l':
+      sscanf(optarg,"%d",&Parameter.latency);
+      break;
+    case 'r':
+      sscanf(optarg,"%f",&Parameter.loss_rate);
+      break;
+    case 'j':
+      sscanf(optarg,"%d",&Parameter.jitter);
+      break;
+    }
+    opt=getopt( argc, argv, optString );
+  }
+  sprintf(filter_exp,"udp and (host %s or host %s )",
+       inet_ntoa(Parameter.ip1), inet_ntoa(Parameter.ip2));
+  cout<<filter_exp<<endl;
+
+  bpf_u_int32 mask;	    /* Our netmask */
+  bpf_u_int32 net;		/* Our IP */
+  struct pcap_pkthdr header;	/* The header that pcap gives us */
+  const u_char *packet;		/* The actual packet */
+
+
 		/* Find the properties for the device */
 		if (pcap_lookupnet(dev, &net, &mask, errbuf) == -1) {
 			fprintf(stderr, "Couldn't get netmask for device %s: %s\n", dev, errbuf);
@@ -122,11 +167,11 @@ int main(int argc,char* arg[])
 			fprintf(stderr, "Couldn't open device %s: %s\n", dev, errbuf);
 			return(2);
         }
-        if(argc>2)
-          filter_exp=arg[2];
+        else
+          printf("listen: %s/%s \n",inet_ntoa(in_addr {net}),inet_ntoa(in_addr {mask}) );
 
 		/* Compile and apply the filter */
-		if (pcap_compile(handle, &fp, filter_exp, 0, net) == -1) {
+        if (pcap_compile(handle, &fp, filter_exp,0, net) == -1) {
 			fprintf(stderr, "Couldn't parse filter %s: %s\n", filter_exp, pcap_geterr(handle));
 			return(2);
 		}
@@ -140,58 +185,81 @@ int main(int argc,char* arg[])
     pcap_loop(handle,0, got_packet,NULL);
 
 		/* And close the session */
-		pcap_close(handle);
+    pcap_close(handle);
 
   return 0;
 }
 
+unsigned short check_sum(unsigned short *addr,int len){
+  register int nleft=len;
+  register int sum=0;
+  register short *w=addr;
+  short answer=0;
+
+  while(nleft>1)
+  {
+    sum+=*w++;
+    nleft-=2;
+  }
+  if(nleft==1)
+  {
+    *(unsigned char *)(&answer)=*(unsigned char *)w;
+    sum+=answer;
+  }
+  sum=(sum>>16)+(sum&0xffff);
+  sum+=(sum>>16);
+  answer=~sum;
+  return(answer);
+}
 void got_packet(u_char *args, const struct pcap_pkthdr *header,
                 const u_char *packet)
 {
 #define SIZE_ETHERNET 14
     const struct sniff_ethernet *ethernet; /* The ethernet header */
-	const struct iphdr *ip; /* The IP header */
-	const struct tcphdr *tcp; /* The TCP header */
-     u_char *payload; /* Packet payload */
-
-	u_int size_ip;
-    u_int size_tcp;
-    u_int size_udp=sizeof(udphdr);
+    struct iphdr *ip; /* The IP header */
+    u_char *payload; /* Packet payload */
+    u_char * dst_ip;
+    u_int size_ip;
     ethernet = (struct sniff_ethernet*)(packet);
     ip = (struct iphdr*)(packet + SIZE_ETHERNET);
     size_ip = (ip->ihl)*4;
-    if((ip->daddr)>>24 >200 )
-      return;
-    printf("ip hdr size:%u,total :%04x\n",size_ip,ip->tot_len );
-	if (size_ip < 20)
+    if (size_ip < 20)
     {
       printf("   * Invalid IP header length: %u bytes\n", size_ip);
       return;
-   }
+    }
     printf("ip address src:%s",inet_ntoa((struct in_addr ){ip->saddr}));
-    printf(" -> dst:%s\n",inet_ntoa((struct in_addr ){ip->daddr}) );
-    //  printf("s:%08x\nd:%08x\n",ip->saddr,u_int(ip->daddr));//((u_char*)&ip->saddr)+4));
+    printf(" -> dst:%s\n",inet_ntoa((struct in_addr )     {ip->daddr}) );
+    payload = (u_char *)(packet + SIZE_ETHERNET);
+
   if(ip->protocol==6)
     {
+      const struct tcphdr *tcp;        /* The TCP header */
       tcp = (struct tcphdr*)(packet + SIZE_ETHERNET + size_ip);
-      size_tcp = sizeof(tcphdr);
-      if (size_tcp < 20) {
-        printf("   * Invalid TCP header length: %u bytes\n", size_tcp);
-        return;
-      }
-      printf("tcp src:%u -> dst:%u\n",tcp->th_sport,tcp->th_dport+1);
-      payload = (u_char *)(packet + SIZE_ETHERNET + size_ip + size_tcp);
+      printf("tcp src:%u -> dst:%u\n",TE(tcp->th_sport,2),TE(tcp->th_dport+1,2));
     }
   else if(ip->protocol==17)
     {
         const struct udphdr *udp;
         udp=(struct udphdr*)(packet + SIZE_ETHERNET+ size_ip);
-        printf("udp src:%u->dst:%u len:%u\n",
-               transfer_endian(udp->source,2),transfer_endian(udp->dest,2),transfer_endian(udp->len,2) );
-        payload = (u_char *)(packet + SIZE_ETHERNET+ size_ip + sizeof(udphdr));
-        string t=(char*)payload;
-        data_queue.push(bad_packet(t));
+        printf("udp src:%u->dst:%u\n",TE(udp->source,2),TE(udp->dest,2));
     }
   else
     printf("-\n");
+  in_addr dst;
+  if(Parameter.ip1.s_addr == inet_addr((char*)&ip->saddr))
+    dst=Parameter.ip2;
+  else
+    dst=Parameter.ip1;
+  char *t=inet_ntoa(dst);
+  int ip_size=TE(ip->tot_len,2);
+  //memcpy((void *)&ip->daddr,t,4);
+  char tmp[4];
+  memcpy(tmp,(void*)&ip->daddr,4);
+  memcpy((void*)&ip->daddr,(void*)&ip->saddr,4);
+  memcpy((void*)&ip->saddr,tmp,4);
+  ip->check=0;
+  ip->check=check_sum((unsigned short)ip,size_ip);
+  cout<<"a---------";
+  data_queue.push(bad_ip_packet(string((char*)ip,ip_size)));
 }
